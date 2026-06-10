@@ -752,6 +752,14 @@ def fetch_or_create_effect_id(  # Resolve direction and text configurations to u
     return int(created[0])  # Return the new ID integer
 
 
+def sync_sequences(conn: Any) -> None:  # Synchronize sequence counters with actual max IDs in tables
+    conn.execute("SELECT setval('face_types_id_seq', coalesce((select max(id) from face_types), 0) + 1, false)")  # Sync face_types_id_seq
+    conn.execute("SELECT setval('types_id_seq', coalesce((select max(id) from types), 0) + 1, false)")  # Sync types_id_seq
+    conn.execute("SELECT setval('pokemon_sets_id_seq', coalesce((select max(id) from pokemon_sets), 0) + 1, false)")  # Sync pokemon_sets_id_seq
+    conn.execute("SELECT setval('skill_cards_id_seq', coalesce((select max(id) from skill_cards), 0) + 1, false)")  # Sync skill_cards_id_seq
+    conn.execute("SELECT setval('effects_id_seq', coalesce((select max(id) from effects), 0) + 1, false)")  # Sync effects_id_seq
+
+
 def import_csv(  # Main CSV importer routine orchestrating database updates
     database_url: str,
     csv_path: Path,
@@ -776,6 +784,7 @@ def import_csv(  # Main CSV importer routine orchestrating database updates
         ) from exc  # Link original exception context
 
     with psycopg.connect(database_url) as conn:  # Open transactional connection context using connection string
+        sync_sequences(conn)  # Synchronize sequence counters with maximum IDs in database tables
         face_type_cache = load_existing_face_types(conn)  # Pre-populate local cache with all database face configurations
 
         for set_import in imports:  # Iterate over each parsed set in CSV imports
