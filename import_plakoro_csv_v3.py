@@ -365,6 +365,24 @@ def build_face_key(type_ids: Iterable[tuple[int, int]]) -> tuple[tuple[int, int]
     return tuple(sorted(type_ids, key=lambda item: item[0]))  # Return sorted type-quantity pairs for caching consistency
 
 
+def get_next_id_if_needed(conn: Any, table_name: str, column_name: str = "id") -> int | None:
+    # Check if the column has a default value (like nextval)
+    res = conn.execute(
+        """
+        select column_default 
+        from information_schema.columns 
+        where table_schema = 'public' and table_name = %s and column_name = %s
+        """,
+        (table_name, column_name)
+    ).fetchone()
+    if res is not None and res[0] is not None:
+        # Column has a default value, let database handle identity/auto-increment
+        return None
+    # No default value found, query max value manually and increment
+    row = conn.execute(f"select coalesce(max({column_name}), 0) + 1 from {table_name}").fetchone()
+    return int(row[0])
+
+
 def fetch_or_create_type_id(  # Resolve element name to types table ID with mapping support
     conn: Any,
     face_name: str,
@@ -403,14 +421,25 @@ def fetch_or_create_type_id(  # Resolve element name to types table ID with mapp
             )
             return type_id  # Return resolved type ID
 
-        created = conn.execute(  # Insert a new record with all mapped fields
-            """
-            insert into types (th_name, en_name, type_image)
-            values (%s, %s, %s)
-            returning id
-            """,
-            (mapping['th'], mapping['eng'], mapping['image']),  # Bind mapped values
-        ).fetchone()  # Fetch newly created ID
+        next_id = get_next_id_if_needed(conn, "types")
+        if next_id is not None:
+            created = conn.execute(  # Insert a new record with manually provided ID
+                """
+                insert into types (id, th_name, en_name, type_image)
+                values (%s, %s, %s, %s)
+                returning id
+                """,
+                (next_id, mapping['th'], mapping['eng'], mapping['image']),
+            ).fetchone()
+        else:
+            created = conn.execute(  # Insert a new record with all mapped fields
+                """
+                insert into types (th_name, en_name, type_image)
+                values (%s, %s, %s)
+                returning id
+                """,
+                (mapping['th'], mapping['eng'], mapping['image']),  # Bind mapped values
+            ).fetchone()  # Fetch newly created ID
         assert created is not None  # Assert record creation was successful
         return int(created[0])  # Return new type ID
 
@@ -428,14 +457,25 @@ def fetch_or_create_type_id(  # Resolve element name to types table ID with mapp
     if existing is not None:  # If an existing type is found in the database
         return int(existing[0])  # Return the casted integer ID of the existing type
 
-    created = conn.execute(  # Insert a new type using the face name if not found
-        """
-        insert into types (th_name)
-        values (%s)
-        returning id
-        """,
-        (face_name,),  # Bind parameter to input face_name as th_name
-    ).fetchone()  # Fetch the returned new ID
+    next_id = get_next_id_if_needed(conn, "types")
+    if next_id is not None:
+        created = conn.execute(  # Insert a new type with manual ID
+            """
+            insert into types (id, th_name)
+            values (%s, %s)
+            returning id
+            """,
+            (next_id, face_name),
+        ).fetchone()
+    else:
+        created = conn.execute(  # Insert a new type using the face name if not found
+            """
+            insert into types (th_name)
+            values (%s)
+            returning id
+            """,
+            (face_name,),  # Bind parameter to input face_name as th_name
+        ).fetchone()  # Fetch the returned new ID
     assert created is not None  # Assert that the returning statement returned a row
     return int(created[0])  # Return the casted integer ID of the newly created type
 
@@ -501,9 +541,15 @@ def fetch_or_create_face_type_id(  # Resolve face combination to database ID
             conn.execute("insert into face_types (id) values (%s) returning id", (mapped_id,)).fetchone()[0]
         )
     else:
-        face_type_id = int(  # Insert a new record into face_types to get a new ID
-            conn.execute("insert into face_types default values returning id").fetchone()[0]  # Insert and fetch ID
-        )
+        next_id = get_next_id_if_needed(conn, "face_types")
+        if next_id is not None:
+            face_type_id = int(
+                conn.execute("insert into face_types (id) values (%s) returning id", (next_id,)).fetchone()[0]
+            )
+        else:
+            face_type_id = int(  # Insert a new record into face_types to get a new ID
+                conn.execute("insert into face_types default values returning id").fetchone()[0]  # Insert and fetch ID
+            )
 
     for type_id, quantity in face_key:  # Loop through constituents of the new face type
         conn.execute(  # Link type ID components to the face type ID
@@ -575,23 +621,44 @@ def resolve_pokemon_id(  # Find or update the matching pokemon_sets ID
             )
             return pokemon_id  # Return updated record ID
 
-        created = conn.execute(  # Insert a new detailed Pokemon record in the table
-            """
-            insert into pokemon_sets (en_pokemon_name, th_pokemon_name, hp, type_id, weakness_type_id, en_description, th_description, pokemon_image)
-            values (%s, %s, %s, %s, %s, %s, %s, %s)
-            returning id
-            """,
-            (
-                pokemon_data.en_name,  # English name
-                pokemon_data.th_name,  # Thai name
-                pokemon_data.hp,  # HP
-                type_id,  # Resolved type ID
-                weakness_type_id,  # Resolved weakness ID
-                pokemon_data.en_description,  # English description text
-                pokemon_data.th_description,  # Thai description text
-                pokemon_data.url,  # Character URL image
-            ),
-        ).fetchone()  # Fetch returned ID
+        next_id = get_next_id_if_needed(conn, "pokemon_sets")
+        if next_id is not None:
+            created = conn.execute(
+                """
+                insert into pokemon_sets (id, en_pokemon_name, th_pokemon_name, hp, type_id, weakness_type_id, en_description, th_description, pokemon_image)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                returning id
+                """,
+                (
+                    next_id,
+                    pokemon_data.en_name,
+                    pokemon_data.th_name,
+                    pokemon_data.hp,
+                    type_id,
+                    weakness_type_id,
+                    pokemon_data.en_description,
+                    pokemon_data.th_description,
+                    pokemon_data.url,
+                ),
+            ).fetchone()
+        else:
+            created = conn.execute(  # Insert a new detailed Pokemon record in the table
+                """
+                insert into pokemon_sets (en_pokemon_name, th_pokemon_name, hp, type_id, weakness_type_id, en_description, th_description, pokemon_image)
+                values (%s, %s, %s, %s, %s, %s, %s, %s)
+                returning id
+                """,
+                (
+                    pokemon_data.en_name,  # English name
+                    pokemon_data.th_name,  # Thai name
+                    pokemon_data.hp,  # HP
+                    type_id,  # Resolved type ID
+                    weakness_type_id,  # Resolved weakness ID
+                    pokemon_data.en_description,  # English description text
+                    pokemon_data.th_description,  # Thai description text
+                    pokemon_data.url,  # Character URL image
+                ),
+            ).fetchone()  # Fetch returned ID
         assert created is not None  # Assert insert was successful
         return int(created[0])  # Return created type ID
 
@@ -609,23 +676,41 @@ def resolve_pokemon_id(  # Find or update the matching pokemon_sets ID
     else:  # If no default type ID is provided
         type_row = conn.execute("select id from types order by id limit 1").fetchone()  # Query first available type
         if type_row is None:  # If the types table is completely empty
-            created_type = conn.execute(  # Insert a fallback Unknown type
-                "insert into types (en_name) values (%s) returning id",
-                ("Unknown",),  # Bind default name 'Unknown'
-            ).fetchone()  # Fetch new type ID
+            next_id = get_next_id_if_needed(conn, "types")
+            if next_id is not None:
+                created_type = conn.execute(
+                    "insert into types (id, en_name) values (%s, %s) returning id",
+                    (next_id, "Unknown"),
+                ).fetchone()
+            else:
+                created_type = conn.execute(  # Insert a fallback Unknown type
+                    "insert into types (en_name) values (%s) returning id",
+                    ("Unknown",),  # Bind default name 'Unknown'
+                ).fetchone()  # Fetch new type ID
             type_id = int(created_type[0])  # Cast ID of created fallback type
         else:  # If types exist in the table
             type_id = int(type_row[0])  # Cast ID of existing available type
 
-    created = conn.execute(  # Insert a minimal pokemon_sets row using the resolved type ID
-        """
-        insert into pokemon_sets (en_pokemon_name, th_pokemon_name, hp, type_id, weakness_type_id)
-        values (%s, %s, %s, %s, %s)
-        returning id
-        """,
-        (lookup_name, lookup_name, 10, type_id, type_id),  # Bind name, placeholder HP=10, types to type_id
-    ).fetchone()  # Fetch generated primary key ID
-    assert created is not None  # Verify insert operation was successful
+    next_id = get_next_id_if_needed(conn, "pokemon_sets")
+    if next_id is not None:
+        created = conn.execute(
+            """
+            insert into pokemon_sets (id, en_pokemon_name, th_pokemon_name, hp, type_id, weakness_type_id)
+            values (%s, %s, %s, %s, %s, %s)
+            returning id
+            """,
+            (next_id, lookup_name, lookup_name, 10, type_id, type_id),
+        ).fetchone()
+    else:
+        created = conn.execute(  # Insert a minimal pokemon_sets row using the resolved type ID
+            """
+            insert into pokemon_sets (en_pokemon_name, th_pokemon_name, hp, type_id, weakness_type_id)
+            values (%s, %s, %s, %s, %s)
+            returning id
+            """,
+            (lookup_name, lookup_name, 10, type_id, type_id),  # Bind name, placeholder HP=10, types to type_id
+        ).fetchone()  # Verify insert operation was successful
+    assert created is not None  # Verify that the returning statement returned a row
     return int(created[0])  # Return the casted integer ID of the created Pokémon
 
 
@@ -803,24 +888,27 @@ def fetch_or_create_effect_id(  # Resolve direction and text configurations to u
                 )
             return db_id  # Return matching resolved database record ID
 
-    created = conn.execute(  # Insert a new distinct effect record if no compatible one exists
-        """
-        insert into effects (directions, th_effect, en_effect)
-        values (%s, %s, %s)
-        returning id
-        """,
-        (sorted_dirs, th, en),  # Bind directions array and normalized translations
-    ).fetchone()  # Fetch newly generated primary key
+    next_id = get_next_id_if_needed(conn, "effects")
+    if next_id is not None:
+        created = conn.execute(
+            """
+            insert into effects (id, directions, th_effect, en_effect)
+            values (%s, %s, %s, %s)
+            returning id
+            """,
+            (next_id, sorted_dirs, th, en),
+        ).fetchone()
+    else:
+        created = conn.execute(  # Insert a new distinct effect record if no compatible one exists
+            """
+            insert into effects (directions, th_effect, en_effect)
+            values (%s, %s, %s)
+            returning id
+            """,
+            (sorted_dirs, th, en),  # Bind directions array and normalized translations
+        ).fetchone()  # Fetch newly generated primary key
     assert created is not None  # Assert record insert was successful
     return int(created[0])  # Return the new ID integer
-
-
-def sync_sequences(conn: Any) -> None:  # Synchronize sequence counters with actual max IDs in tables
-    conn.execute("SELECT setval('face_types_id_seq', coalesce((select max(id) from face_types), 0) + 1, false)")  # Sync face_types_id_seq
-    conn.execute("SELECT setval('types_id_seq', coalesce((select max(id) from types), 0) + 1, false)")  # Sync types_id_seq
-    conn.execute("SELECT setval('pokemon_sets_id_seq', coalesce((select max(id) from pokemon_sets), 0) + 1, false)")  # Sync pokemon_sets_id_seq
-    conn.execute("SELECT setval('skill_cards_id_seq', coalesce((select max(id) from skill_cards), 0) + 1, false)")  # Sync skill_cards_id_seq
-    conn.execute("SELECT setval('effects_id_seq', coalesce((select max(id) from effects), 0) + 1, false)")  # Sync effects_id_seq
 
 
 def import_csv(  # Main CSV importer routine orchestrating database updates
@@ -859,7 +947,6 @@ def import_csv(  # Main CSV importer routine orchestrating database updates
         ) from exc  # Link original exception context
 
     with psycopg.connect(database_url) as conn:  # Open transactional connection context using connection string
-        sync_sequences(conn)  # Synchronize sequence counters with maximum IDs in database tables
         face_id_map = parse_dice_face_ids(dice_face_id_csv_path, conn, type_mappings)
         face_type_cache = load_existing_face_types(conn)  # Pre-populate local cache with all database face configurations
 
@@ -919,23 +1006,45 @@ def import_csv(  # Main CSV importer routine orchestrating database updates
                 conn.execute("delete from skill_cards where pokemon_id = %s", (pokemon_id,))  # Clear existing linked skill cards
                 for skill in skill_cards:  # Loop through each skill card card
                     skill_type_id = fetch_or_create_type_id(conn, skill.skill_type, type_mappings)  # Resolve type ID of combat element
-                    skill_id = int(conn.execute(  # Insert skill card record details
-                        """
-                        insert into skill_cards (pokemon_id, en_skill_name, th_skill_name, type_id, damage, en_fighting_ability, th_fighting_ability, image_url)
-                        values (%s, %s, %s, %s, %s, %s, %s, %s)
-                        returning id
-                        """,
-                        (
-                            pokemon_id,
-                            skill.en_name,
-                            skill.th_name,
-                            skill_type_id,
-                            skill.damage,
-                            skill.fighting_ability_en,
-                            skill.fighting_ability_th,
-                            skill.url,
-                        )
-                    ).fetchone()[0])
+                    
+                    next_id = get_next_id_if_needed(conn, "skill_cards")
+                    if next_id is not None:
+                        skill_id = int(conn.execute(
+                            """
+                            insert into skill_cards (id, pokemon_id, en_skill_name, th_skill_name, type_id, damage, en_fighting_ability, th_fighting_ability, image_url)
+                            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            returning id
+                            """,
+                            (
+                                next_id,
+                                pokemon_id,
+                                skill.en_name,
+                                skill.th_name,
+                                skill_type_id,
+                                skill.damage,
+                                skill.fighting_ability_en,
+                                skill.fighting_ability_th,
+                                skill.url,
+                            )
+                        ).fetchone()[0])
+                    else:
+                        skill_id = int(conn.execute(  # Insert skill card record details
+                            """
+                            insert into skill_cards (pokemon_id, en_skill_name, th_skill_name, type_id, damage, en_fighting_ability, th_fighting_ability, image_url)
+                            values (%s, %s, %s, %s, %s, %s, %s, %s)
+                            returning id
+                            """,
+                            (
+                                pokemon_id,
+                                skill.en_name,
+                                skill.th_name,
+                                skill_type_id,
+                                skill.damage,
+                                skill.fighting_ability_en,
+                                skill.fighting_ability_th,
+                                skill.url,
+                            )
+                        ).fetchone()[0])
                     skill_ids.append(skill_id)  # Add generated ID to list
 
                     # Insert energy cost components for this skill card
@@ -989,7 +1098,7 @@ def import_csv(  # Main CSV importer routine orchestrating database updates
 
 def main() -> None:  # Entrypoint parser configuration
     parser = argparse.ArgumentParser(  # Set up arguments parser
-        description="Import Plakoro CSV data into PostgreSQL (v2 Schema compatible)."
+        description="Import Plakoro CSV data into PostgreSQL (v3 Schema compatible)."
     )
     parser.add_argument(  # Add positional argument for CSV file location
         "csv_path",
